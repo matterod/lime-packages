@@ -1,0 +1,16 @@
+#!/usr/bin/lua
+local JSON = require('luci.jsonc')
+local leases = JSON.parse(io.stdin:read('*a')) or {}
+local myself = io.open('/proc/sys/kernel/hostname'):read('*l')
+
+local f = io.open('/tmp/ethers.mesh','w')
+for ip, v in pairs(leases) do
+  if v.mac and v.author ~= myself then
+    f:write(string.format('%s %s\n', v.mac, ip))     -- MAC␠IP
+  end
+end
+f:close()
+
+-- ensure odhcpd uses the fresh static map
+os.execute('/etc/init.d/odhcpd reload')
+
