@@ -1,7 +1,7 @@
 #!/usr/bin/lua
 
 --! LiMe Proto Babeld
---! Copyright (C) 2018  Gioacchino Mazzurco <gio@altermundi.net>
+--! Copyright (C) 2018-2024  Gioacchino Mazzurco <gio@altermundi.net>
 --!
 --! This program is free software: you can redistribute it and/or modify
 --! it under the terms of the GNU Affero General Public License as
@@ -19,10 +19,29 @@
 local network = require("lime.network")
 local config = require("lime.config")
 local fs = require("nixio.fs")
+local utils = require("lime.utils") -- Asegurarnos de tener utils
 
 babeld = {}
 
 babeld.configured = false
+
+--- CAMBIO EMPIEZA AQUÍ ---
+-- Nueva función "ayudante" para saber si una interfaz está en el puente LAN
+function babeld._is_in_lan_bridge(ifname)
+	local uci = config.get_uci_cursor()
+	local lan_ports = uci:get("network", "lan", "ports") or uci:get("network", "br-lan", "ports")
+
+	if lan_ports then
+		for _, port in ipairs(lan_ports) do
+			if port == ifname then
+				return true
+			end
+		end
+	end
+	return false
+end
+--- CAMBIO TERMINA AQUÍ ---
+
 
 function babeld.configure(args)
 	if babeld.configured then return end
@@ -87,60 +106,71 @@ function babeld.configure(args)
 	uci:set("babeld", "denyany", "type", "redistribute")
 	uci:set("babeld", "denyany", "action", "deny")
 
+	--- CAMBIO EMPIEZA AQUÍ ---
+	-- Añadimos la configuración para que babel funcione sobre el puente LAN 'br-lan'
+	utils.log("lime.proto.babeld: Adding babeld configuration for br-lan bridge.")
+	uci:set("babeld", "br_lan", "interface")
+	uci:set("babeld", "br_lan", "ifname", "br-lan")
+	uci:set("babeld", "br_lan", "type", "wireless") -- 'wireless' es más seguro y evita problemas de temporización
+	--- CAMBIO TERMINA AQUÍ ---
+
 	uci:save("babeld")
 
 end
 
+
+--- CAMBIO EMPIEZA AQUÍ ---
+-- Esta es la función principal que se modifica por completo.
 function babeld.setup_interface(ifname, args)
-	if not args["specific"] and ifname:match("^wlan%d+.ap") then
-		utils.log("lime.proto.babeld.setup_interface(%s, ...) ignored", ifname)
+	-- Si la interfaz es un punto de acceso (AP) o está en el puente LAN, la ignoramos.
+	-- El puente LAN ya se configuró de forma global en la función configure().
+	if (not args["specific"] and ifname:match("^wlan%d+.ap")) or babeld._is_in_lan_bridge(ifname) then
+		utils.log("lime.proto.babeld.setup_interface(%s, ...) ignored because it's an AP or in LAN bridge.", ifname)
 		return
 	end
 
-	utils.log("lime.proto.babeld.setup_interface(%s, ...)", ifname)
-
-	local vlanId = args[2] or 17
-	local vlanProto = args[3] or "8021ad"
-	local nameSuffix = args[4] or "_babeld"
-
-	local owrtInterfaceName, linuxVlanIfName, owrtDeviceName =
-	  network.createVlanIface(ifname, vlanId, nameSuffix, vlanProto)
-
-	local ipv4, _ = network.primary_address()
+	utils.log("lime.proto.babeld.setup_interface(%s, ...) configuring directly without VLAN.", ifname)
 
 	local uci = config.get_uci_cursor()
 
-	if(vlanId ~= 0 and (ifname:match("^eth") or ifname:match("^lan"))) then
-		uci:set("network", owrtDeviceName, "mtu", tostring(network.MTU_ETH_WITH_VLAN))
-	end
+	-- Ya no usamos createVlanIface. En su lugar, creamos una interfaz estática simple.
+	local owrtInterfaceName = network.sanitizeIfaceName(ifname .. "_babeld_if")
+	local ipv4, _ = network.primary_address()
 
+	-- Creamos la sección de interfaz en /etc/config/network
+	uci:set("network", owrtInterfaceName, "interface")
 	uci:set("network", owrtInterfaceName, "proto", "static")
+	uci:set("network", owrtInterfaceName, "device", ifname) -- ¡Usamos el dispositivo físico directamente!
 	uci:set("network", owrtInterfaceName, "ipaddr", ipv4:host():string())
 	uci:set("network", owrtInterfaceName, "netmask", "255.255.255.255")
 	uci:save("network")
 
-	uci:set("babeld", owrtInterfaceName, "interface")
-	uci:set("babeld", owrtInterfaceName, "ifname", linuxVlanIfName)
-	--! It is quite common to have dummy radio device attached via ethernet so
-	--! disable wired optimization always as it would consider the link down at
-	--! first packet lost
-	uci:set("babeld", owrtInterfaceName, "type", "wireless")
+	-- Creamos la sección de interfaz para babeld en /etc/config/babeld
+	local babeldSectionName = "babeld_" .. ifname:gsub("[^%w_]", "_")
+	uci:set("babeld", babeldSectionName, "interface")
+	uci:set("babeld", babeldSectionName, "ifname", ifname) -- ¡Le decimos a babeld que use la interfaz física!
+	uci:set("babeld", babeldSectionName, "type", "wireless")
 
 	uci:save("babeld")
 end
+--- CAMBIO TERMINA AQUÍ ---
+
 
 function babeld.runOnDevice(linuxDev, args)
 	utils.log("lime.proto.babeld.runOnDevice(%s, ...)", linuxDev)
 
-	local vlanId = args[2] or 17
-	local vlanProto = args[3] or "8021ad"
+	--- CAMBIO EMPIEZA AQUÍ ---
+	-- También modificamos esta función para que no use VLAN
+	utils.log("lime.proto.babeld.runOnDevice(%s, ...) running directly without VLAN.", linuxDev)
 
-	local vlanDev = network.createVlan(linuxDev, vlanId, vlanProto)
-	network.createStatic(vlanDev)
+	-- Ya no creamos una VLAN. Usamos el dispositivo directamente.
+	network.createStatic(linuxDev)
 
 	local libubus = require("ubus")
 	local ubus = libubus.connect()
-	ubus:call('babeld', 'add_interface', { ifname = vlanDev })
+	-- Le decimos a ubus que añada la interfaz física, no una vlan.
+	ubus:call('babeld', 'add_interface', { ifname = linuxDev })
+	--- CAMBIO TERMINA AQUÍ ---
 end
 
 return babeld
