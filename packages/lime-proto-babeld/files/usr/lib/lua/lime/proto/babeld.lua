@@ -87,8 +87,37 @@ function babeld.configure(args)
 	uci:set("babeld", "denyany", "type", "redistribute")
 	uci:set("babeld", "denyany", "action", "deny")
 
-	uci:save("babeld")
+	local mesh_on_lan = config.get("network", "mesh_on_lan")
 
+	if mesh_on_lan == "1" then
+		uci:set("babeld", "br_lan_interface", "interface") 
+		uci:set("babeld", "br_lan_interface", "ifname", "br-lan")
+		uci:set("babeld", "br_lan_interface", "type", "wired")
+
+		local babeldOverBatman = config.get_bool("network", "babeld_over_batman")
+
+		if utils.is_installed("kmod-batman-adv") and not babeldOverBatman then
+			utils.log("Creating nftables rule to prevent Babel packets over bat0.")
+			fs.mkdir("/etc/nftables.d")
+			
+			local nft_rules = [[
+				table netdev lime_babel_filter {
+    				chain filter_babel_on_bat0 {
+        				type filter hook egress device bat0 priority -150;
+        				
+        				ip6 nexthdr udp udp sport 6696 udp dport 6696 drop;
+    				}
+				}
+				]]
+			fs.writefile("/etc/nftables.d/20-lime-babel-filter.nft", nft_rules)
+		else
+			fs.remove("/etc/nftables.d/20-lime-babel-filter.nft")
+		end
+	else
+		fs.remove("/etc/nftables.d/20-lime-babel-filter.nft")
+	end
+
+	uci:save("babeld")
 end
 
 function babeld.setup_interface(ifname, args)
@@ -109,10 +138,6 @@ function babeld.setup_interface(ifname, args)
 	local ipv4, _ = network.primary_address()
 
 	local uci = config.get_uci_cursor()
-
-	if(vlanId ~= 0 and (ifname:match("^eth") or ifname:match("^lan"))) then
-		uci:set("network", owrtDeviceName, "mtu", tostring(network.MTU_ETH_WITH_VLAN))
-	end
 
 	uci:set("network", owrtInterfaceName, "proto", "static")
 	uci:set("network", owrtInterfaceName, "ipaddr", ipv4:host():string())
