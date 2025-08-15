@@ -98,13 +98,13 @@ function babeld.configure(args)
 		if not fs.stat("/etc/nft-lime/20-lime-babel-filter.nft") then
 			fs.writefile("/etc/nft-lime/20-lime-babel-filter.nft", [[
 			table netdev lime_babel_filter {
-			chain prevent_babel_leak_from_bat0 {
-				type filter hook ingress device "bat0" priority 0; policy accept;
-				ether daddr 33:33:00:00:01:06 counter drop
-				ether daddr 01:00:5e:00:00:6f counter drop
-				ip6 nexthdr udp udp dport 6696 counter drop
-				ip  protocol udp udp dport 6696 counter drop
-			}
+				chain prevent_babel_leak_from_bat0 {
+					type filter hook ingress device "bat0" priority 0; policy accept;
+					ether daddr 33:33:00:00:01:06 counter drop
+					ether daddr 01:00:5e:00:00:6f counter drop
+					ip6 nexthdr udp udp dport 6696 counter drop
+					ip  protocol udp udp dport 6696 counter drop
+				}
 			}
 			]])
 
