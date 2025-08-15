@@ -87,14 +87,36 @@ function babeld.configure(args)
 	uci:set("babeld", "denyany", "type", "redistribute")
 	uci:set("babeld", "denyany", "action", "deny")
 
-	--local mesh_on_lan = config.get("network", "mesh_on_lan")
-
-	--if mesh_on_lan == "1" then
 	uci:set("babeld", "br_lan_interface", "interface") 
 	uci:set("babeld", "br_lan_interface", "ifname", "br-lan")
 	uci:set("babeld", "br_lan_interface", "type", "wired")
 
 	uci:save("babeld")
+
+	if utils.is_installed("kmod-batman-adv") then
+		if not fs.stat("/etc/nft-lime") then fs.mkdir("/etc/nft-lime") end
+		if not fs.stat("/etc/nft-lime/20-lime-babel-filter.nft") then
+			fs.writefile("/etc/nft-lime/20-lime-babel-filter.nft", [[
+			table netdev lime_babel_filter {
+			chain prevent_babel_leak_from_bat0 {
+				type filter hook ingress device "bat0" priority 0; policy accept;
+				ether daddr 33:33:00:00:01:06 counter drop
+				ether daddr 01:00:5e:00:00:6f counter drop
+				ip6 nexthdr udp udp dport 6696 counter drop
+				ip  protocol udp udp dport 6696 counter drop
+			}
+			}
+			]])
+
+			uci:set("firewall", "lime_babel_filter_include", "include")
+			uci:set("firewall", "lime_babel_filter_include", "path", "/etc/nftables.d/20-lime-babel-filter.nft")
+			uci:set("firewall", "lime_babel_filter_include", "type", "nftables")
+			uci:set("firewall", "lime_babel_filter_include", "position", "ruleset-post")
+			uci:set("firewall", "lime_babel_filter_include", "enabled", "1")
+
+			uci:save("firewall")
+		end
+	end
 end
 
 function babeld.setup_interface(ifname, args)
@@ -105,10 +127,6 @@ function babeld.setup_interface(ifname, args)
 
 	utils.log("lime.proto.babeld.setup_interface(%s, ...)", ifname)
 
-	local vlanId = args[2] or 17 -- revisar
-	local vlanProto = args[3] or "8021ad" --revisar
-	local nameSuffix = args[4] or "_babeld"
-
 	local owrtInterfaceName, linuxVlanIfName, owrtDeviceName =
 	  network.createVlanIface(ifname, vlanId, nameSuffix, vlanProto) --revisar
 
@@ -116,37 +134,25 @@ function babeld.setup_interface(ifname, args)
 
 	local uci = config.get_uci_cursor()
 
-	--if(vlanId ~= 0 and (ifname:match("^eth") or ifname:match("^lan"))) then
-		--uci:set("network", owrtDeviceName, "mtu", tostring(network.MTU_ETH_WITH_VLAN))
-	--end
+  local section_name = "babeld_" .. ifname:gsub("[.-]", "_")
 
-	uci:set("network", owrtInterfaceName, "proto", "static")
-	uci:set("network", owrtInterfaceName, "ipaddr", ipv4:host():string())
-	uci:set("network", owrtInterfaceName, "netmask", "255.255.255.255")
-	uci:save("network")
+  uci:set("babeld", section_name, "interface")
+  uci:set("babeld", section_name, "ifname", ifname)
 
-	uci:set("babeld", owrtInterfaceName, "interface")
-	uci:set("babeld", owrtInterfaceName, "ifname", linuxVlanIfName)
-	--! It is quite common to have dummy radio device attached via ethernet so
-	--! disable wired optimization always as it would consider the link down at
-	--! first packet lost
-	uci:set("babeld", owrtInterfaceName, "type", "wireless")
+  if ifname:match("^wlan") then
+      uci:set("babeld", section_name, "type", "wireless")
+  else
+      uci:set("babeld", section_name, "type", "wired")
+  end
 
 	uci:save("babeld")
 end
 
 function babeld.runOnDevice(linuxDev, args)
 	utils.log("lime.proto.babeld.runOnDevice(%s, ...)", linuxDev)
-
-	local vlanId = args[2] or 17 -- revisar
-	local vlanProto = args[3] or "8021ad" -- revisar
-
-	local vlanDev = network.createVlan(linuxDev, vlanId, vlanProto) -- revisar
-	network.createStatic(vlanDev) -- revisar
-
 	local libubus = require("ubus")
 	local ubus = libubus.connect()
-	ubus:call('babeld', 'add_interface', { ifname = vlanDev }) -- revisar
+	ubus:call('babeld', 'add_interface', { ifname = linuxDev })
 end
 
 return babeld
